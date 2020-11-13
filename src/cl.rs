@@ -110,17 +110,14 @@ pub fn futhark_context(selector: GPUSelector) -> ClResult<Arc<Mutex<FutharkConte
     let mut map = FUTHARK_CONTEXT_MAP.write().unwrap();
 
     let key = selector.get_key();
-    info!("device key: {}", key);
     if !map.contains_key(&key) {
         if let Some(device) = selector.get_device() {
             info!("device: {:?}", device);
-            let cl_device_id = unsafe {
-                std::mem::transmute::<cl_device_id, bindings::cl_device_id>(device.cl_device_id())
-            };
+            let cl_device_id = device.cl_device_id() as bindings::cl_device_id;
             let context = create_futhark_context(cl_device_id)?;
             map.insert(key.clone(), Arc::new(Mutex::new(context)));
         } else {
-            unimplemented!();
+            return Err(ClError::BusIdNotAvailable);
         }
     }
     Ok(Arc::clone(&map[&key]))
