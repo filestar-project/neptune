@@ -13,10 +13,10 @@ bellperson = { version = "0.12", default-features = false }
 blake2s_simd = "0.5"
 byteorder = "1"
 ff = { version = "0.2.1", package = "fff" }
-generic-array = "0.14.4"
 log = "0.4.8"
 rust-gpu-tools = { version = "0.2.2", optional = true }
 smallvec = "1.4.2"
+typenum = "1.12.0"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 triton = { version = "2.0.0", package = "neptune-triton", default-features = false, features = ["opencl"], optional = true }
@@ -46,7 +46,7 @@ incremental = false
 codegen-units = 1
 
 [features]
-default = ["pairing"]
+default = ["pairing", "gpu"]
 gpu = ["triton", "rust-gpu-tools"]
 pairing = ["bellperson/pairing"]
 blst = ["bellperson/blst"]

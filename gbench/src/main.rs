@@ -1,8 +1,5 @@
 use bellperson::bls::Fr;
 use ff::Field;
-use generic_array::sequence::GenericSequence;
-use generic_array::typenum::{U11, U8};
-use generic_array::GenericArray;
 use log::info;
 use neptune::batch_hasher::BatcherType;
 use neptune::column_tree_builder::{ColumnTreeBuilder, ColumnTreeBuilderTrait};
@@ -12,6 +9,7 @@ use rust_gpu_tools::opencl::GPUSelector;
 use std::result::Result;
 use std::thread;
 use std::time::Instant;
+use typenum::{U11, U8};
 
 fn bench_column_building(
     log_prefix: &str,
@@ -32,7 +30,7 @@ fn bench_column_building(
 
     // Simplify computing the expected root.
     let constant_element = Fr::zero();
-    let constant_column = GenericArray::<Fr, U11>::generate(|_| constant_element);
+    let constant_column = [constant_element; 11];
 
     let max_batch_size = if let Some(batcher) = &builder.column_batcher {
         batcher.max_batch_size()
@@ -52,21 +50,29 @@ fn bench_column_building(
     let mut total_columns = 0;
     while total_columns + effective_batch_size < leaves {
         print!(".");
-        let columns = (0..effective_batch_size).map(|_| constant_column.as_slice());
+        let columns: Vec<_> = (0..effective_batch_size)
+            .map(|_| constant_column.iter())
+            .flatten()
+            .cloned()
+            .collect();
 
-        let _ = builder.add_columns(columns).unwrap();
+        let _ = builder.add_columns(&columns).unwrap();
         total_columns += effective_batch_size;
     }
     println!();
 
-    let x = GenericArray::<Fr, U11>::generate(|_| constant_element);
-    let final_columns = (0..leaves - total_columns).map(|_| x.as_slice());
+    let x = [constant_element; 11];
+    let final_columns: Vec<_> = (0..leaves - total_columns)
+        .map(|_| x.iter())
+        .flatten()
+        .cloned()
+        .collect();
 
     info!(
         "{}: adding final column batch and building tree",
         log_prefix
     );
-    let (_, res) = builder.add_final_columns(final_columns).unwrap();
+    let (_, res) = builder.add_final_columns(&final_columns).unwrap();
     info!("{}: end commitment", log_prefix);
     let elapsed = start.elapsed();
     info!("{}: commitment time: {:?}", log_prefix, elapsed);
