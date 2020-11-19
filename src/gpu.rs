@@ -8,29 +8,33 @@ use std::marker::PhantomData;
 use std::sync::Mutex;
 use triton::FutharkContext;
 use triton::{Array_u64_1d, Array_u64_2d, Array_u64_3d};
-use typenum::{U11, U2, U8};
+use typenum::{U11, U2, U5, U8};
 
 /// Convenience type aliases for opaque pointers from the generated Futhark bindings.
 type P2State = triton::FutharkOpaqueP2State;
+type P5State = triton::FutharkOpaqueP5State;
 type P8State = triton::FutharkOpaqueP8State;
 type P11State = triton::FutharkOpaqueP11State;
 
 type S2State = triton::FutharkOpaqueS2State;
+type S5State = triton::FutharkOpaqueS5State;
 type S8State = triton::FutharkOpaqueS8State;
 type S11State = triton::FutharkOpaqueS11State;
 
 pub(crate) type T864MState = triton::FutharkOpaqueT864MState;
 
 lazy_static! {
-    pub static ref FUTHARK_CONTEXT: Mutex<FutharkContext> = Mutex::new(FutharkContext::new());
+    pub static ref FUTHARK_CONTEXT: Mutex<FutharkContext> = Mutex::new(FutharkContext::new().unwrap());
 }
 
 /// Container to hold the state corresponding to each supported arity.
 enum BatcherState {
     Arity2(P2State),
+    Arity5(P5State),
     Arity8(P8State),
     Arity11(P11State),
     Arity2s(S2State),
+    Arity5s(S5State),
     Arity8s(S8State),
     Arity11s(S11State),
 }
@@ -48,6 +52,7 @@ impl BatcherState {
         let mut ctx = ctx.lock().unwrap();
         Ok(match A::to_usize() {
             size if size == 2 => init_hash2(&mut ctx, strength)?,
+            size if size == 5 => init_hash5(&mut ctx, strength)?,
             size if size == 8 => init_hash8(&mut ctx, strength)?,
             size if size == 11 => init_hash11(&mut ctx, strength)?,
             _ => panic!("unsupported arity: {}", A::to_usize()),
@@ -68,6 +73,10 @@ impl BatcherState {
                 let (res, state) = mbatch_hash2(ctx, state, preimages)?;
                 Ok((res, BatcherState::Arity2(state)))
             }
+            BatcherState::Arity5(state) => {
+                let (res, state) = mbatch_hash5(ctx, state, preimages)?;
+                Ok((res, BatcherState::Arity5(state)))
+            }
             BatcherState::Arity8(state) => {
                 let (res, state) = mbatch_hash8(ctx, state, preimages)?;
                 Ok((res, BatcherState::Arity8(state)))
@@ -79,6 +88,10 @@ impl BatcherState {
             BatcherState::Arity2s(state) => {
                 let (res, state) = mbatch_hash2s(ctx, state, preimages)?;
                 Ok((res, BatcherState::Arity2s(state)))
+            }
+            BatcherState::Arity5s(state) => {
+                let (res, state) = mbatch_hash5s(ctx, state, preimages)?;
+                Ok((res, BatcherState::Arity5s(state)))
             }
             BatcherState::Arity8s(state) => {
                 let (res, state) = mbatch_hash8s(ctx, state, preimages)?;
@@ -377,6 +390,36 @@ fn init_hash2(ctx: &mut FutharkContext, strength: Strength) -> Result<BatcherSta
     }
 }
 
+fn init_hash5(ctx: &mut FutharkContext, strength: Strength) -> Result<BatcherState, Error> {
+    let constants = GPUConstants(PoseidonConstants::<Bls12, U5>::new_with_strength(strength));
+    match strength {
+        Strength::Standard => {
+            let state = ctx
+                .init5(
+                    constants.arity_tag(&ctx)?,
+                    constants.round_keys(&ctx)?,
+                    constants.mds_matrix(&ctx)?,
+                    constants.pre_sparse_matrix(&ctx)?,
+                    constants.sparse_matrixes(&ctx)?,
+                )
+                .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
+            Ok(BatcherState::Arity5(state))
+        }
+        Strength::Strengthened => {
+            let state = ctx
+                .init5s(
+                    constants.arity_tag(&ctx)?,
+                    constants.round_keys(&ctx)?,
+                    constants.mds_matrix(&ctx)?,
+                    constants.pre_sparse_matrix(&ctx)?,
+                    constants.sparse_matrixes(&ctx)?,
+                )
+                .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
+            Ok(BatcherState::Arity5s(state))
+        }
+    }
+}
+
 fn init_hash8(ctx: &mut FutharkContext, strength: Strength) -> Result<BatcherState, Error> {
     let constants = GPUConstants(PoseidonConstants::<Bls12, U8>::new_with_strength(strength));
     match strength {
@@ -459,7 +502,30 @@ where
         .mbatch_hash2(state, input)
         .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
 
-    let (vec, _shape) = res.to_vec();
+    let (vec, _shape) = res.to_vec()?;
+    let frs = unpack_fr_array_from_monts(vec.as_slice())?;
+
+    Ok((frs.to_vec(), state))
+}
+
+fn mbatch_hash5<A>(
+    ctx: &mut FutharkContext,
+    state: &mut P5State,
+    preimages: &[GenericArray<Fr, A>],
+) -> Result<(Vec<Fr>, P5State), Error>
+    where
+        A: Arity<Fr>,
+{
+    assert_eq!(5, A::to_usize());
+    let flat_preimages = as_mont_u64s(preimages);
+    let input = Array_u64_1d::from_vec(*ctx, &flat_preimages, &[flat_preimages.len() as i64, 1])
+        .map_err(|_| Error::Other("could not convert".to_string()))?;
+
+    let (res, state) = ctx
+        .mbatch_hash5(state, input)
+        .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
+
+    let (vec, _shape) = res.to_vec()?;
     let frs = unpack_fr_array_from_monts(vec.as_slice())?;
 
     Ok((frs.to_vec(), state))
@@ -482,7 +548,7 @@ where
         .mbatch_hash8(state, input)
         .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
 
-    let (vec, _shape) = res.to_vec();
+    let (vec, _shape) = res.to_vec()?;
     let frs = unpack_fr_array_from_monts(vec.as_slice())?;
 
     Ok((frs.to_vec(), state))
@@ -505,7 +571,7 @@ where
         .mbatch_hash11(state, input)
         .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
 
-    let (vec, _shape) = res.to_vec();
+    let (vec, _shape) = res.to_vec()?;
     let frs = unpack_fr_array_from_monts(vec.as_slice())?;
 
     Ok((frs.to_vec(), state))
@@ -528,7 +594,30 @@ where
         .mbatch_hash2s(state, input)
         .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
 
-    let (vec, _shape) = res.to_vec();
+    let (vec, _shape) = res.to_vec()?;
+    let frs = unpack_fr_array_from_monts(vec.as_slice())?;
+
+    Ok((frs.to_vec(), state))
+}
+
+fn mbatch_hash5s<A>(
+    ctx: &mut FutharkContext,
+    state: &mut S5State,
+    preimages: &[GenericArray<Fr, A>],
+) -> Result<(Vec<Fr>, S5State), Error>
+    where
+        A: Arity<Fr>,
+{
+    assert_eq!(5, A::to_usize());
+    let flat_preimages = as_mont_u64s(preimages);
+    let input = Array_u64_1d::from_vec(*ctx, &flat_preimages, &[flat_preimages.len() as i64, 1])
+        .map_err(|_| Error::Other("could not convert".to_string()))?;
+
+    let (res, state) = ctx
+        .mbatch_hash5s(state, input)
+        .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
+
+    let (vec, _shape) = res.to_vec()?;
     let frs = unpack_fr_array_from_monts(vec.as_slice())?;
 
     Ok((frs.to_vec(), state))
@@ -551,7 +640,7 @@ where
         .mbatch_hash8s(state, input)
         .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
 
-    let (vec, _shape) = res.to_vec();
+    let (vec, _shape) = res.to_vec()?;
     let frs = unpack_fr_array_from_monts(vec.as_slice())?;
 
     Ok((frs.to_vec(), state))
@@ -574,7 +663,7 @@ where
         .mbatch_hash11s(state, input)
         .map_err(|e| Error::GPUError(format!("{:?}", e)))?;
 
-    let (vec, _shape) = res.to_vec();
+    let (vec, _shape) = res.to_vec()?;
     let frs = unpack_fr_array_from_monts(vec.as_slice())?;
 
     Ok((frs.to_vec(), state))
@@ -599,7 +688,7 @@ mod tests {
     #[test]
     fn test_mbatch_hash2() {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
-        let mut ctx = FutharkContext::new();
+        let mut ctx = FutharkContext::new().unwrap();
         let mut state =
             if let BatcherState::Arity2(s) = init_hash2(&mut ctx, Strength::Standard).unwrap() {
                 s
@@ -629,7 +718,7 @@ mod tests {
     #[test]
     fn test_mbatch_hash2s() {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
-        let mut ctx = FutharkContext::new();
+        let mut ctx = FutharkContext::new().unwrap();
         let mut state = if let BatcherState::Arity2s(s) =
             init_hash2(&mut ctx, Strength::Strengthened).unwrap()
         {
@@ -658,9 +747,70 @@ mod tests {
     }
 
     #[test]
+    fn test_mbatch_hash5() {
+        let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
+        let mut ctx = FutharkContext::new().unwrap();
+        let mut state =
+            if let BatcherState::Arity5(s) = init_hash5(&mut ctx, Strength::Standard).unwrap() {
+                s
+            } else {
+                panic!("expected Arity5");
+            };
+        let batch_size = 100;
+
+        let mut gpu_hasher =
+            GPUBatchHasher::<U5>::new_with_strength(Strength::Standard, batch_size).unwrap();
+        let mut simple_hasher =
+            SimplePoseidonBatchHasher::<U5>::new_with_strength(Strength::Standard, batch_size)
+                .unwrap();
+
+        let preimages = (0..batch_size)
+            .map(|_| GenericArray::<Fr, U5>::generate(|_| Fr::random(&mut rng)))
+            .collect::<Vec<_>>();
+
+        let (hashes, _) = mbatch_hash5(&mut ctx, &mut state, preimages.as_slice()).unwrap();
+        let gpu_hashes = gpu_hasher.hash(&preimages).unwrap();
+        let expected_hashes: Vec<_> = simple_hasher.hash(&preimages).unwrap();
+
+        assert_eq!(expected_hashes, hashes);
+        assert_eq!(expected_hashes, gpu_hashes);
+    }
+
+    #[test]
+    fn test_mbatch_hash5s() {
+        let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
+        let mut ctx = FutharkContext::new().unwrap();
+        let mut state = if let BatcherState::Arity5s(s) =
+        init_hash5(&mut ctx, Strength::Strengthened).unwrap()
+        {
+            s
+        } else {
+            panic!("expected Arity5s");
+        };
+        let batch_size = 100;
+
+        let mut gpu_hasher =
+            GPUBatchHasher::<U5>::new_with_strength(Strength::Strengthened, batch_size).unwrap();
+        let mut simple_hasher =
+            SimplePoseidonBatchHasher::<U5>::new_with_strength(Strength::Strengthened, batch_size)
+                .unwrap();
+
+        let preimages = (0..batch_size)
+            .map(|_| GenericArray::<Fr, U5>::generate(|_| Fr::random(&mut rng)))
+            .collect::<Vec<_>>();
+
+        let (hashes, _) = mbatch_hash5s(&mut ctx, &mut state, preimages.as_slice()).unwrap();
+        let gpu_hashes = gpu_hasher.hash(&preimages).unwrap();
+        let expected_hashes: Vec<_> = simple_hasher.hash(&preimages).unwrap();
+
+        assert_eq!(expected_hashes, hashes);
+        assert_eq!(expected_hashes, gpu_hashes);
+    }
+
+    #[test]
     fn test_mbatch_hash8() {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
-        let mut ctx = FutharkContext::new();
+        let mut ctx = FutharkContext::new().unwrap();
         let mut state =
             if let BatcherState::Arity8(s) = init_hash8(&mut ctx, Strength::Standard).unwrap() {
                 s
@@ -690,7 +840,7 @@ mod tests {
     #[test]
     fn test_mbatch_hash8s() {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
-        let mut ctx = FutharkContext::new();
+        let mut ctx = FutharkContext::new().unwrap();
         let mut state = if let BatcherState::Arity8s(s) =
             init_hash8(&mut ctx, Strength::Strengthened).unwrap()
         {
@@ -721,7 +871,7 @@ mod tests {
     #[test]
     fn test_mbatch_hash11() {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
-        let mut ctx = FutharkContext::new();
+        let mut ctx = FutharkContext::new().unwrap();
         let mut state =
             if let BatcherState::Arity11(s) = init_hash11(&mut ctx, Strength::Standard).unwrap() {
                 s
@@ -751,7 +901,7 @@ mod tests {
     #[test]
     fn test_mbatch_hash11s() {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
-        let mut ctx = FutharkContext::new();
+        let mut ctx = FutharkContext::new().unwrap();
         let mut state = if let BatcherState::Arity11s(s) =
             init_hash11(&mut ctx, Strength::Strengthened).unwrap()
         {

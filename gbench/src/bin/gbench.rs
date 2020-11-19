@@ -1,6 +1,6 @@
 use ff::Field;
 use generic_array::sequence::GenericSequence;
-use generic_array::typenum::{U11, U8};
+use generic_array::typenum::{U5, U8};
 use generic_array::GenericArray;
 use log::info;
 use neptune::batch_hasher::BatcherType;
@@ -18,7 +18,7 @@ fn bench_column_building(
     max_tree_batch_size: usize,
 ) -> Fr {
     info!("Creating ColumnTreeBuilder");
-    let mut builder = ColumnTreeBuilder::<U11, U8>::new(
+    let mut builder = ColumnTreeBuilder::<U5, U8>::new(
         batcher_type,
         leaves,
         max_column_batch_size,
@@ -29,7 +29,7 @@ fn bench_column_building(
 
     // Simplify computing the expected root.
     let constant_element = Fr::zero();
-    let constant_column = GenericArray::<Fr, U11>::generate(|_| constant_element);
+    let constant_column = GenericArray::<Fr, U5>::generate(|_| constant_element);
 
     let max_batch_size = if let Some(batcher) = &builder.column_batcher {
         batcher.max_batch_size()
@@ -49,7 +49,7 @@ fn bench_column_building(
     let mut total_columns = 0;
     while total_columns + effective_batch_size < leaves {
         print!(".");
-        let columns: Vec<GenericArray<Fr, U11>> =
+        let columns: Vec<GenericArray<Fr, U5>> =
             (0..effective_batch_size).map(|_| constant_column).collect();
 
         let _ = builder.add_columns(columns.as_slice()).unwrap();
@@ -58,7 +58,7 @@ fn bench_column_building(
     println!("");
 
     let final_columns: Vec<_> = (0..leaves - total_columns)
-        .map(|_| GenericArray::<Fr, U11>::generate(|_| constant_element))
+        .map(|_| GenericArray::<Fr, U5>::generate(|_| constant_element))
         .collect();
 
     info!("adding final column batch and building tree");
