@@ -1,3 +1,5 @@
+#[cfg(all(feature = "gpu", not(target_os = "macos")))]
+use crate::cl;
 use std::{error, fmt};
 
 #[derive(Debug, Clone)]
@@ -9,10 +11,19 @@ pub enum Error {
     IndexOutOfBounds,
     /// The provided leaf was not found in the tree
     GPUError(String),
+    #[cfg(all(feature = "gpu", not(target_os = "macos")))]
+    ClError(cl::ClError),
     #[cfg(feature = "gpu")]
     TritonError(String),
     DecodingError,
     Other(String),
+}
+
+#[cfg(all(feature = "gpu", not(target_os = "macos")))]
+impl From<cl::ClError> for Error {
+    fn from(e: cl::ClError) -> Self {
+        Self::ClError(e)
+    }
 }
 
 
@@ -37,6 +48,8 @@ impl fmt::Display for Error {
             Error::GPUError(s) => write!(f, "GPU Error: {}", s),
             #[cfg(feature = "gpu")]
             Error::TritonError(e) => write!(f, "Neptune-triton Error: {}", e),
+            #[cfg(all(feature = "gpu", not(target_os = "macos")))]
+            Error::ClError(e) => write!(f, "OpenCL Error: {}", e),
             Error::DecodingError => write!(f, "PrimeFieldDecodingError"),
             Error::Other(s) => write!(f, "{}", s),
         }

@@ -1,11 +1,14 @@
+#[cfg(all(feature = "gpu", not(target_os = "macos")))]
+use crate::cl;
 use crate::error::Error;
 use crate::poseidon::PoseidonConstants;
 use crate::{Arity, BatchHasher, Strength, DEFAULT_STRENGTH};
 use ff::{PrimeField, PrimeFieldDecodingError};
 use generic_array::{typenum, ArrayLength, GenericArray};
 use paired::bls12_381::{Bls12, Fr, FrRepr};
+use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use triton::FutharkContext;
 use triton::{Array_u64_1d, Array_u64_2d, Array_u64_3d};
 use typenum::{U11, U2, U5, U8};
@@ -23,10 +26,6 @@ type S11State = triton::FutharkOpaqueS11State;
 
 pub(crate) type T864MState = triton::FutharkOpaqueT864MState;
 
-lazy_static! {
-    pub static ref FUTHARK_CONTEXT: Mutex<FutharkContext> = Mutex::new(FutharkContext::new().unwrap());
-}
-
 /// Container to hold the state corresponding to each supported arity.
 enum BatcherState {
     Arity2(P2State),
@@ -42,11 +41,11 @@ enum BatcherState {
 impl BatcherState {
     /// Create a new state for use in batch hashing preimages of `Arity` elements.
     /// State is an opaque pointer supplied to the corresponding GPU entry point when processing a batch.
-    fn new<A: Arity<Fr>>(ctx: &Mutex<FutharkContext>) -> Result<Self, Error> {
+    fn new<A: Arity<Fr>>(ctx: Arc<Mutex<FutharkContext>>) -> Result<Self, Error> {
         Self::new_with_strength::<A>(ctx, DEFAULT_STRENGTH)
     }
     fn new_with_strength<A: Arity<Fr>>(
-        ctx: &Mutex<FutharkContext>,
+        ctx: Arc<Mutex<FutharkContext>>,
         strength: Strength,
     ) -> Result<Self, Error> {
         let mut ctx = ctx.lock().unwrap();
@@ -106,8 +105,8 @@ impl BatcherState {
 }
 
 /// `GPUBatchHasher` implements `BatchHasher` and performs the batched hashing on GPU.
-pub struct GPUBatchHasher<'a, A> {
-    ctx: &'a Mutex<FutharkContext>,
+pub struct GPUBatchHasher<A> {
+    ctx: Arc<Mutex<FutharkContext>>,
     state: BatcherState,
     /// If `tree_builder_state` is provided, use it to build the final 64MiB tree on the GPU with one call.
     tree_builder_state: Option<T864MState>,
@@ -115,24 +114,27 @@ pub struct GPUBatchHasher<'a, A> {
     _a: PhantomData<A>,
 }
 
-impl<A> GPUBatchHasher<'_, A>
+impl<A> GPUBatchHasher<A>
 where
     A: Arity<Fr>,
 {
     /// Create a new `GPUBatchHasher` and initialize it with state corresponding with its `A`.
-    pub(crate) fn new(max_batch_size: usize) -> Result<Self, Error> {
-        Self::new_with_strength(DEFAULT_STRENGTH, max_batch_size)
+    pub(crate) fn new(
+        ctx: Arc<Mutex<FutharkContext>>,
+        max_batch_size: usize,
+    ) -> Result<Self, Error> {
+        Self::new_with_strength(ctx, DEFAULT_STRENGTH, max_batch_size)
     }
 
     /// Create a new `GPUBatchHasher` and initialize it with state corresponding with its `A`.
     pub(crate) fn new_with_strength(
+        ctx: Arc<Mutex<FutharkContext>>,
         strength: Strength,
         max_batch_size: usize,
     ) -> Result<Self, Error> {
-        let ctx = &*FUTHARK_CONTEXT;
         Ok(Self {
-            ctx,
-            state: BatcherState::new_with_strength::<A>(ctx, strength)?,
+            ctx: Arc::clone(&ctx),
+            state: BatcherState::new_with_strength::<A>(Arc::clone(&ctx), strength)?,
             tree_builder_state: None,
             max_batch_size,
             _a: PhantomData::<A>,
@@ -140,7 +142,7 @@ where
     }
 }
 
-impl<A> Drop for GPUBatchHasher<'_, A> {
+impl<A> Drop for GPUBatchHasher<A> {
     fn drop(&mut self) {
         let ctx = self.ctx.lock().unwrap();
         unsafe {
@@ -149,7 +151,7 @@ impl<A> Drop for GPUBatchHasher<'_, A> {
     }
 }
 
-impl<A> BatchHasher<A> for GPUBatchHasher<'_, A>
+impl<A> BatchHasher<A> for GPUBatchHasher<A>
 where
     A: Arity<Fr>,
 {
@@ -697,8 +699,12 @@ mod tests {
             };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U2>::new_with_strength(Strength::Standard, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U2>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Standard,
+            batch_size,
+        )
+        .unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U2>::new_with_strength(Strength::Standard, batch_size)
                 .unwrap();
@@ -728,8 +734,12 @@ mod tests {
         };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U2>::new_with_strength(Strength::Strengthened, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U2>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Strengthened,
+            batch_size,
+        )
+        .unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U2>::new_with_strength(Strength::Strengthened, batch_size)
                 .unwrap();
@@ -758,8 +768,11 @@ mod tests {
             };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U5>::new_with_strength(Strength::Standard, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U5>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Standard,
+            batch_size,
+        ).unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U5>::new_with_strength(Strength::Standard, batch_size)
                 .unwrap();
@@ -781,7 +794,7 @@ mod tests {
         let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
         let mut ctx = FutharkContext::new().unwrap();
         let mut state = if let BatcherState::Arity5s(s) =
-        init_hash5(&mut ctx, Strength::Strengthened).unwrap()
+            init_hash5(&mut ctx, Strength::Strengthened).unwrap()
         {
             s
         } else {
@@ -789,8 +802,11 @@ mod tests {
         };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U5>::new_with_strength(Strength::Strengthened, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U5>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Strengthened,
+            batch_size,
+        ).unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U5>::new_with_strength(Strength::Strengthened, batch_size)
                 .unwrap();
@@ -819,8 +835,12 @@ mod tests {
             };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U8>::new_with_strength(Strength::Standard, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U8>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Standard,
+            batch_size,
+        )
+        .unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U8>::new_with_strength(Strength::Standard, batch_size)
                 .unwrap();
@@ -850,8 +870,12 @@ mod tests {
         };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U8>::new_with_strength(Strength::Strengthened, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U8>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Strengthened,
+            batch_size,
+        )
+        .unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U8>::new_with_strength(Strength::Strengthened, batch_size)
                 .unwrap();
@@ -880,8 +904,12 @@ mod tests {
             };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U11>::new_with_strength(Strength::Standard, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U11>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Standard,
+            batch_size,
+        )
+        .unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U11>::new_with_strength(Strength::Standard, batch_size)
                 .unwrap();
@@ -911,8 +939,12 @@ mod tests {
         };
         let batch_size = 100;
 
-        let mut gpu_hasher =
-            GPUBatchHasher::<U11>::new_with_strength(Strength::Strengthened, batch_size).unwrap();
+        let mut gpu_hasher = GPUBatchHasher::<U11>::new_with_strength(
+            cl::default_futhark_context().unwrap(),
+            Strength::Strengthened,
+            batch_size,
+        )
+        .unwrap();
         let mut simple_hasher =
             SimplePoseidonBatchHasher::<U11>::new_with_strength(Strength::Strengthened, batch_size)
                 .unwrap();
@@ -927,5 +959,44 @@ mod tests {
 
         assert_eq!(expected_hashes, hashes);
         assert_eq!(expected_hashes, gpu_hashes);
+    }
+
+    fn test_mbatch_hash8_on_device(dev: Arc<Mutex<FutharkContext>>) {
+        let mut rng = XorShiftRng::from_seed(crate::TEST_SEED);
+        let mut ctx = FutharkContext::new().unwrap();
+        let mut state =
+            if let BatcherState::Arity8(s) = init_hash8(&mut ctx, Strength::Standard).unwrap() {
+                s
+            } else {
+                panic!("expected Arity8");
+            };
+        let batch_size = 100;
+
+        let mut gpu_hasher =
+            GPUBatchHasher::<U8>::new_with_strength(dev, Strength::Standard, batch_size).unwrap();
+        let mut simple_hasher =
+            SimplePoseidonBatchHasher::<U8>::new_with_strength(Strength::Standard, batch_size)
+                .unwrap();
+
+        let preimages = (0..batch_size)
+            .map(|_| GenericArray::<Fr, U8>::generate(|_| Fr::random(&mut rng)))
+            .collect::<Vec<_>>();
+
+        let (hashes, _) = mbatch_hash8(&mut ctx, &mut state, preimages.as_slice()).unwrap();
+        let gpu_hashes = gpu_hasher.hash(&preimages).unwrap();
+        let expected_hashes: Vec<_> = simple_hasher.hash(&preimages).unwrap();
+
+        assert_eq!(expected_hashes, hashes);
+        assert_eq!(expected_hashes, gpu_hashes);
+    }
+
+    #[test]
+    fn test_custom_gpus() {
+        let bus_ids = cl::get_all_bus_ids().unwrap();
+        for bus_id in bus_ids {
+            test_mbatch_hash8_on_device(
+                cl::futhark_context(cl::GPUSelector::BusId(bus_id)).unwrap(),
+            );
+        }
     }
 }
